@@ -17,10 +17,11 @@ import (
 )
 
 var (
-	bind        = flag.String("b", "127.0.0.1:8080", "Bind address")
-	verbose     = flag.Bool("v", false, "Show access log")
-	credentials = flag.String("c", "", "The path to the keyfile. If not present, client will use your default application credentials.")
-	blockIfMeta = flag.String("block-if", "", "Optional metadata which, if present on an object, results in a 404 from the proxy (example: Blocked:true)")
+	bind            = flag.String("b", "127.0.0.1:8080", "Bind address")
+	verbose         = flag.Bool("v", false, "Show access log")
+	credentials     = flag.String("c", "", "The path to the keyfile. If not present, client will use your default application credentials.")
+	blockIfMeta     = flag.String("block-if", "", "Optional metadata which, if present on an object, results in a 404 from the proxy (example: Blocked:true)")
+	passthroughMeta = flag.String("pass-through", "", "Set to a comma-separated metadata keys to pass through as headers")
 )
 
 var (
@@ -122,6 +123,8 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 		return
 	}
+	writeMetadataHeaders(attr, w)
+
 	if lastStrs, ok := r.Header["If-Modified-Since"]; ok && len(lastStrs) > 0 {
 		last, err := http.ParseTime(lastStrs[0])
 		if *verbose && err != nil {
@@ -156,16 +159,41 @@ func isBlocked(attr *storage.ObjectAttrs) (bool, error) {
 	return attr.Metadata[key] == value, nil
 }
 
+// TODO(bilus): Parsing (parseBlockIfMeta, parsePassthroughMeta) in every
+// request is not very efficient but (probably) negligible compared to the I/O.
+// Profile using actual GCS access.
+
 func parseBlockIfMeta() (key, value string, err error) {
 	// Uses global flag directly to avoid making too many changes deviating
 	// from the original code base.
-
 	parts := strings.Split(*blockIfMeta, ":")
 	if len(parts) != 2 {
 		return "", "", fmt.Errorf("unexpected block-if argument: %v", blockIfMeta)
 	}
 
 	return parts[0], parts[1], nil
+}
+
+func writeMetadataHeaders(attr *storage.ObjectAttrs, w http.ResponseWriter) {
+	metaToPass := parsePassthroughMeta()
+
+	prefix := "X-Goog-Meta-"
+	for k, v := range attr.Metadata {
+		if _, passthrough := metaToPass[k]; passthrough {
+			setStrHeader(w, fmt.Sprintf("%s%s", prefix, k), v)
+		}
+	}
+}
+
+func parsePassthroughMeta() map[string]struct{} {
+	// Uses global flag directly to avoid making too many changes deviating
+	// from the original code base.
+	set := make(map[string]struct{})
+	metas := strings.Split(*passthroughMeta, ",")
+	for _, meta := range metas {
+		set[meta] = struct{}{}
+	}
+	return set
 }
 
 func clientAcceptsGzip(r *http.Request) bool {
