@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -19,6 +20,7 @@ var (
 	bind        = flag.String("b", "127.0.0.1:8080", "Bind address")
 	verbose     = flag.Bool("v", false, "Show access log")
 	credentials = flag.String("c", "", "The path to the keyfile. If not present, client will use your default application credentials.")
+	blockIfMeta = flag.String("block-if", "", "Optional metadata which, if present on an object, results in a 404 from the proxy (example: Blocked:true)")
 )
 
 var (
@@ -108,6 +110,18 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 		handleError(w, err)
 		return
 	}
+	blocked, err := isBlocked(attr)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+	if blocked {
+		if *verbose {
+			log.Printf("Object %v is blocked", attr.Name)
+		}
+		w.WriteHeader(404)
+		return
+	}
 	if lastStrs, ok := r.Header["If-Modified-Since"]; ok && len(lastStrs) > 0 {
 		last, err := http.ParseTime(lastStrs[0])
 		if *verbose && err != nil {
@@ -131,6 +145,27 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 	setStrHeader(w, "Content-Disposition", attr.ContentDisposition)
 	setIntHeader(w, "Content-Length", objr.Attrs.Size)
 	io.Copy(w, objr)
+}
+
+func isBlocked(attr *storage.ObjectAttrs) (bool, error) {
+	key, value, err := parseBlockIfMeta()
+	if err != nil {
+		return false, err
+	}
+
+	return attr.Metadata[key] == value, nil
+}
+
+func parseBlockIfMeta() (key, value string, err error) {
+	// Uses global flag directly to avoid making too many changes deviating
+	// from the original code base.
+
+	parts := strings.Split(*blockIfMeta, ":")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("unexpected block-if argument: %v", blockIfMeta)
+	}
+
+	return parts[0], parts[1], nil
 }
 
 func clientAcceptsGzip(r *http.Request) bool {
